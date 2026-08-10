@@ -1,0 +1,26 @@
+{
+  "name": "arc-wallet-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only ARC Mainnet wallet trade notifications for Telegram",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.7",
+    "node-telegram-bot-api": "^0.66.0",
+    "viem": "^2.23.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/node-telegram-bot-api": "^0.64.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  },
+  "engines": { "node": ">=20" }
+}

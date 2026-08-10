@@ -1,0 +1,2 @@
+import { describe,expect,it } from 'vitest'; import { openDatabase } from './database.js'; import { TransactionRepository } from './transactions.js';
+describe('transaction deduplication',()=>it('marks a hash only once',()=>{const db=openDatabase(':memory:');const repo=new TransactionRepository(db);expect(repo.mark('0xabc',1n)).toBe(true);expect(repo.has('0xABC')).toBe(true);expect(repo.mark('0xabc',1n)).toBe(false);db.close();}));
