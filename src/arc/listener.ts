@@ -1,6 +1,6 @@
 import type { PublicClient, Transaction, TransactionReceipt } from 'viem';
 import type { TransactionRepository } from '../db/transactions.js';
-import type { Wallet, WalletRepository } from '../db/wallets.js';
+import type { WalletRepository } from '../db/wallets.js';
 import type { Trade } from '../types/trade.js';
 import { logger } from '../utils/logger.js';
 import type { TransactionAnalyzer } from './transactionAnalyzer.js';
@@ -21,8 +21,8 @@ export class ArcListener {
     private wallets: WalletRepository,
     private txRepo: TransactionRepository,
     private analyzer: TransactionAnalyzer,
-    private onTrade: (trade: Trade) => Promise<void>,
-    private pollingIntervalMs = 4_000,
+    private onTrade: (trade: Trade) => Promise<boolean>,
+    private pollingIntervalMs = 1_000,
   ) {}
 
   connected = () => this.connectedState;
@@ -80,7 +80,6 @@ export class ArcListener {
     while (!this.stopping && next <= target) {
       try {
         await this.processBlock(next);
-        // The checkpoint advances only after the entire block completes successfully.
         this.txRepo.setLatestBlock(next);
         next += 1n;
       } catch (error) {
@@ -93,13 +92,33 @@ export class ArcListener {
   private async processBlock(number: bigint) {
     const block = await this.http.getBlock({ blockNumber: number, includeTransactions: true });
     const wallets = this.wallets.list(true);
+    const walletsByAddress = new Map(
+      wallets.map((wallet) => [wallet.address.toLowerCase(), wallet] as const),
+    );
 
     for (const transaction of block.transactions as Transaction[]) {
+      const wallet = walletsByAddress.get(transaction.from.toLowerCase());
+      if (!wallet) continue;
       if (this.txRepo.has(transaction.hash)) continue;
+
+      const startedAt = Date.now();
+      const timingFields = {
+        txHash: transaction.hash,
+        wallet: wallet.address,
+        blockNumber: number,
+      };
+      logger.info('Tracked wallet transaction detected', {
+        ...timingFields,
+        elapsedMs: Date.now() - startedAt,
+      });
 
       let receipt: TransactionReceipt;
       try {
         receipt = await this.http.getTransactionReceipt({ hash: transaction.hash });
+        logger.info('Receipt fetched', {
+          ...timingFields,
+          elapsedMs: Date.now() - startedAt,
+        });
       } catch (error) {
         logger.warn('Receipt unavailable; retaining block checkpoint for retry', {
           hash: transaction.hash,
@@ -108,41 +127,36 @@ export class ArcListener {
         throw error;
       }
 
-      for (const wallet of this.involvedWallets(wallets, transaction, receipt)) {
-        try {
-          const trade = await this.analyzer.analyze({
-            wallet: wallet.address,
-            walletLabel: wallet.label,
-            transaction,
-            receipt,
-            timestamp: new Date(Number(block.timestamp) * 1_000),
-          });
-          if (trade.type !== 'UNKNOWN') await this.onTrade(trade);
-        } catch (error) {
-          // A malformed transaction must not prevent later transactions or blocks.
-          logger.error('Transaction analysis failed', { hash: transaction.hash, error });
+      try {
+        const trade = await this.analyzer.analyze({
+          wallet: wallet.address,
+          walletLabel: wallet.label,
+          transaction,
+          receipt,
+          timestamp: new Date(Number(block.timestamp) * 1_000),
+        });
+        logger.info('Trade analyzed', {
+          ...timingFields,
+          tradeType: trade.type,
+          elapsedMs: Date.now() - startedAt,
+        });
+        if (trade.type !== 'UNKNOWN') {
+          const notificationSent = await this.onTrade(trade);
+          if (notificationSent) {
+            logger.info('Telegram notification sent', {
+              ...timingFields,
+              tradeType: trade.type,
+              elapsedMs: Date.now() - startedAt,
+            });
+          }
         }
+      } catch (error) {
+        logger.error('Transaction analysis failed', { hash: transaction.hash, error });
       }
       this.txRepo.mark(transaction.hash, number);
     }
 
     logger.info('Block processed', { block: number, transactions: block.transactions.length });
-  }
-
-  private involvedWallets(
-    wallets: Wallet[],
-    transaction: Transaction,
-    receipt: TransactionReceipt,
-  ) {
-    const addresses = [
-      transaction.from,
-      transaction.to,
-      ...receipt.logs.flatMap((log) => [
-        log.topics[1] ? `0x${log.topics[1].slice(-40)}` : '',
-        log.topics[2] ? `0x${log.topics[2].slice(-40)}` : '',
-      ]),
-    ].map((address) => address?.toLowerCase());
-    return wallets.filter((wallet) => addresses.includes(wallet.address));
   }
 
   async stop() {
