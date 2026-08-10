@@ -29,9 +29,9 @@ async function main() {
   const telegram=new TelegramService(required('TELEGRAM_BOT_TOKEN'),required('TELEGRAM_CHAT_ID'),explorerUrl);
   const minUsdc=Number(process.env.MIN_USDC_VALUE ?? '0'); if(!Number.isFinite(minUsdc)||minUsdc<0) throw new Error('MIN_USDC_VALUE must be a non-negative number');
   const shouldNotify=(trade:Trade) => { if(!enabled(`NOTIFY_${trade.type}S`)) return false; const usdc=trade.tokenIn?.symbol.toUpperCase()==='USDC'?trade.tokenIn:trade.tokenOut?.symbol.toUpperCase()==='USDC'?trade.tokenOut:undefined; return !usdc || Number(formatUnits(usdc.rawAmount,usdc.decimals))>=minUsdc; };
-  const pollInterval = Number(process.env.ARC_POLL_INTERVAL_MS ?? '4000');
+  const pollInterval = Number(process.env.ARC_POLL_INTERVAL_MS ?? '1000');
   if (!Number.isInteger(pollInterval) || pollInterval < 500) throw new Error('ARC_POLL_INTERVAL_MS must be an integer of at least 500');
-  const listener=new ArcListener(httpClient,wsClient,wallets,transactions,new TransactionAnalyzer(new TokenMetadataService(httpClient,db)),async trade=>{if(shouldNotify(trade)) await telegram.notify(trade);},pollInterval);
+  const listener=new ArcListener(httpClient,wsClient,wallets,transactions,new TransactionAnalyzer(new TokenMetadataService(httpClient,db)),async trade=>{if(!shouldNotify(trade)) return false; await telegram.notify(trade); return true;},pollInterval);
   registerCommands(telegram.bot,required('TELEGRAM_CHAT_ID'),wallets,transactions,listener); await listener.start();
   let closing=false; const shutdown=async(signal:string)=>{if(closing)return;closing=true;logger.info('Graceful shutdown',{signal});await listener.stop();await telegram.stop();db.close();};
   process.once('SIGINT',()=>void shutdown('SIGINT')); process.once('SIGTERM',()=>void shutdown('SIGTERM'));
