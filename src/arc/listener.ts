@@ -14,6 +14,7 @@ export class ArcListener {
   private queue = Promise.resolve();
   private stopping = false;
   private pollingTask?: Promise<void>;
+  private lastRecoveryAt = 0;
 
   constructor(
     private http: PublicClient,
@@ -23,13 +24,21 @@ export class ArcListener {
     private analyzer: TransactionAnalyzer,
     private onTrade: (trade: Trade) => Promise<boolean>,
     private pollingIntervalMs = 1_000,
+    private recoveryIntervalMs = 5_000,
+    private recoveryLookbackBlocks = 12n,
   ) {}
 
   connected = () => this.connectedState;
 
   async start() {
     if (this.txRepo.latestBlock() === undefined) {
-      this.txRepo.setLatestBlock(await this.http.getBlockNumber());
+      const tip = await this.http.getBlockNumber();
+      // Re-read a short recent window after a fresh/recreated runtime. This avoids
+      // losing a trade that landed while the service was restarting/deploying.
+      const start = tip > this.recoveryLookbackBlocks
+        ? tip - this.recoveryLookbackBlocks
+        : 0n;
+      this.txRepo.setLatestBlock(start);
     }
 
     if (this.ws) {
@@ -51,6 +60,8 @@ export class ArcListener {
     logger.info('ARC Mainnet listener started', {
       mode: 'http-polling',
       intervalMs: this.pollingIntervalMs,
+      recoveryIntervalMs: this.recoveryIntervalMs,
+      recoveryLookbackBlocks: this.recoveryLookbackBlocks,
     });
     this.pollingTask = this.pollContinuously();
   }
@@ -67,6 +78,15 @@ export class ArcListener {
         const latest = await this.http.getBlockNumber();
         this.connectedState = true;
         await this.catchUp(latest);
+
+        // A provider can occasionally return a block before all indexed data is
+        // available. Re-reading a tiny recent window lets us recover a tracked
+        // transaction that was absent from an earlier response. txRepo prevents
+        // duplicate notifications for transactions already handled.
+        if (Date.now() - this.lastRecoveryAt >= this.recoveryIntervalMs) {
+          await this.recoverRecentBlocks(latest);
+          this.lastRecoveryAt = Date.now();
+        }
       } catch (error) {
         this.connectedState = false;
         logger.error('HTTP block poll failed; retrying', { error });
@@ -75,11 +95,36 @@ export class ArcListener {
     }
   }
 
+  private async recoverRecentBlocks(tip: bigint) {
+    const start = tip >= this.recoveryLookbackBlocks
+      ? tip - this.recoveryLookbackBlocks + 1n
+      : 0n;
+
+    let recovered = 0;
+    for (let block = start; block <= tip && !this.stopping; block += 1n) {
+      try {
+        recovered += await this.processBlock(block, true);
+      } catch (error) {
+        // Recovery is best-effort. The normal ordered catch-up path remains the
+        // source of truth and will retry current-block failures without skipping.
+        logger.warn('Recent block recovery read failed', { block, error });
+      }
+    }
+
+    if (recovered > 0) {
+      logger.info('Recovered missed tracked transactions', {
+        count: recovered,
+        fromBlock: start,
+        toBlock: tip,
+      });
+    }
+  }
+
   private async catchUp(target: bigint) {
     let next = (this.txRepo.latestBlock() ?? target) + 1n;
     while (!this.stopping && next <= target) {
       try {
-        await this.processBlock(next);
+        await this.processBlock(next, false);
         this.txRepo.setLatestBlock(next);
         next += 1n;
       } catch (error) {
@@ -89,12 +134,13 @@ export class ArcListener {
     }
   }
 
-  private async processBlock(number: bigint) {
+  private async processBlock(number: bigint, recovery = false): Promise<number> {
     const block = await this.http.getBlock({ blockNumber: number, includeTransactions: true });
     const wallets = this.wallets.list(true);
     const walletsByAddress = new Map(
       wallets.map((wallet) => [wallet.address.toLowerCase(), wallet] as const),
     );
+    let processedTracked = 0;
 
     for (const transaction of block.transactions as Transaction[]) {
       const wallet = walletsByAddress.get(transaction.from.toLowerCase());
@@ -106,6 +152,7 @@ export class ArcListener {
         txHash: transaction.hash,
         wallet: wallet.address,
         blockNumber: number,
+        recovery,
       };
       logger.info('Tracked wallet transaction detected', {
         ...timingFields,
@@ -120,8 +167,8 @@ export class ArcListener {
           elapsedMs: Date.now() - startedAt,
         });
       } catch (error) {
-        logger.warn('Receipt unavailable; retaining block checkpoint for retry', {
-          hash: transaction.hash,
+        logger.warn('Receipt unavailable; transaction will be retried', {
+          ...timingFields,
           error,
         });
         throw error;
@@ -153,10 +200,15 @@ export class ArcListener {
       } catch (error) {
         logger.error('Transaction analysis failed', { hash: transaction.hash, error });
       }
+
       this.txRepo.mark(transaction.hash, number);
+      processedTracked += 1;
     }
 
-    logger.info('Block processed', { block: number, transactions: block.transactions.length });
+    if (!recovery) {
+      logger.info('Block processed', { block: number, transactions: block.transactions.length });
+    }
+    return processedTracked;
   }
 
   async stop() {
