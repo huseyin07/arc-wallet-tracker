@@ -14,7 +14,7 @@ export class ArcListener {
   private queue = Promise.resolve();
   private stopping = false;
   private pollingTask?: Promise<void>;
-  private lastRecoveryAt = 0;
+  private lastRecoveryAt = Date.now();
 
   constructor(
     private http: PublicClient,
