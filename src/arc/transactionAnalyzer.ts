@@ -36,10 +36,6 @@ export class TransactionAnalyzer {
       received.set('native', (received.get('native') ?? 0n) + tx.value);
     }
 
-    // Arc's USDC has both native and ERC-20 representations. Raw integer values
-    // cannot be compared across decimals (6 vs 18), so never let an 18-decimal
-    // mirror event win merely because its bigint is larger. Prefer the canonical
-    // 6-decimal USDC ERC-20 Transfer whenever it is present for the wallet flow.
     const pick = (map: Map<string, bigint>): Flow | undefined => {
       const canonicalUsdc = map.get(ARC_USDC_ERC20.toLowerCase());
       if (canonicalUsdc !== undefined) {
@@ -59,7 +55,7 @@ export class TransactionAnalyzer {
     if (!outgoing || !incoming || outgoing.address === incoming.address) return { ...base, type: 'UNKNOWN' };
 
     const asset = async (flow: Flow): Promise<AssetAmount> => flow.address === 'native'
-      ? { address: 'native', symbol: 'USDC', name: 'USD Coin', decimals: 18, rawAmount: flow.amount }
+      ? { address: 'native', symbol: 'USDC', name: 'USD Coin', decimals: 6, rawAmount: flow.amount }
       : { address: flow.address, ...await this.metadata.get(flow.address), rawAmount: flow.amount };
 
     const tokenIn = await asset(outgoing), tokenOut = await asset(incoming);
