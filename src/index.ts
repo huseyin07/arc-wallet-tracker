@@ -20,9 +20,14 @@ async function main() {
   const chainId = Number(required('ARC_CHAIN_ID'));
   if (chainId !== 5042) throw new Error('ARC_CHAIN_ID must be 5042 (ARC Mainnet)');
   const explorerUrl = required('ARC_EXPLORER_URL').replace(/\/$/, '');
+  const fallbackRpcUrls = (process.env.ARC_RPC_FALLBACK_URLS ?? '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
   const {httpClient,wsClient}=createArcClients({
     chainId,
     rpcUrl: required('ARC_RPC_URL'),
+    fallbackRpcUrls,
     wsUrl: process.env.ARC_WS_URL?.trim() || undefined,
     explorerUrl,
   });
@@ -31,7 +36,11 @@ async function main() {
   const shouldNotify=(trade:Trade) => { if(!enabled(`NOTIFY_${trade.type}S`)) return false; const usdc=trade.tokenIn?.symbol.toUpperCase()==='USDC'?trade.tokenIn:trade.tokenOut?.symbol.toUpperCase()==='USDC'?trade.tokenOut:undefined; return !usdc || Number(formatUnits(usdc.rawAmount,usdc.decimals))>=minUsdc; };
   const pollInterval = Number(process.env.ARC_POLL_INTERVAL_MS ?? '1000');
   if (!Number.isInteger(pollInterval) || pollInterval < 500) throw new Error('ARC_POLL_INTERVAL_MS must be an integer of at least 500');
-  const listener=new ArcListener(httpClient,wsClient,wallets,transactions,new TransactionAnalyzer(new TokenMetadataService(httpClient,db)),async trade=>{if(!shouldNotify(trade)) return false; await telegram.notify(trade); return true;},pollInterval);
+  const recoveryInterval = Number(process.env.ARC_RECOVERY_INTERVAL_MS ?? '5000');
+  if (!Number.isInteger(recoveryInterval) || recoveryInterval < 1000) throw new Error('ARC_RECOVERY_INTERVAL_MS must be an integer of at least 1000');
+  const recoveryLookback = BigInt(process.env.ARC_RECOVERY_LOOKBACK_BLOCKS ?? '12');
+  if (recoveryLookback < 1n || recoveryLookback > 200n) throw new Error('ARC_RECOVERY_LOOKBACK_BLOCKS must be between 1 and 200');
+  const listener=new ArcListener(httpClient,wsClient,wallets,transactions,new TransactionAnalyzer(new TokenMetadataService(httpClient,db)),async trade=>{if(!shouldNotify(trade)) return false; await telegram.notify(trade); return true;},pollInterval,recoveryInterval,recoveryLookback);
   registerCommands(telegram.bot,required('TELEGRAM_CHAT_ID'),wallets,transactions,listener); await listener.start();
   let closing=false; const shutdown=async(signal:string)=>{if(closing)return;closing=true;logger.info('Graceful shutdown',{signal});await listener.stop();await telegram.stop();db.close();};
   process.once('SIGINT',()=>void shutdown('SIGINT')); process.once('SIGTERM',()=>void shutdown('SIGTERM'));
