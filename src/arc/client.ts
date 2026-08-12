@@ -39,14 +39,14 @@ export function createArcClients(config: ArcNetworkConfig): {
     http(url, { retryCount: 2, timeout: 8_000 }),
   );
 
+  if (transports.length === 0) throw new Error('At least one ARC RPC URL is required');
+
   return {
     httpClient: createPublicClient({
       chain,
       // A single flaky RPC must not stop wallet monitoring. Viem tries the next
       // configured transport when the active provider errors or times out.
-      transport: transports.length > 1
-        ? fallback(transports, { rank: true, retryCount: 1 })
-        : transports[0],
+      transport: transports.length > 1 ? fallback(transports) : transports[0],
     }),
     wsClient: config.wsUrl
       ? createPublicClient({
