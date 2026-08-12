@@ -1,6 +1,7 @@
 import {
   createPublicClient,
   defineChain,
+  fallback,
   http,
   webSocket,
   type PublicClient,
@@ -9,16 +10,18 @@ import {
 export interface ArcNetworkConfig {
   chainId: number;
   rpcUrl: string;
+  fallbackRpcUrls?: string[];
   wsUrl?: string;
   explorerUrl: string;
 }
 
 export function createArcChain(config: ArcNetworkConfig) {
+  const httpUrls = [config.rpcUrl, ...(config.fallbackRpcUrls ?? [])];
   return defineChain({
     id: config.chainId,
     name: 'ARC Mainnet',
-    nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
-    rpcUrls: { default: { http: [config.rpcUrl] } },
+    nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
+    rpcUrls: { default: { http: httpUrls } },
     blockExplorers: { default: { name: 'ARC Scan', url: config.explorerUrl } },
   });
 }
@@ -28,10 +31,22 @@ export function createArcClients(config: ArcNetworkConfig): {
   wsClient?: PublicClient;
 } {
   const chain = createArcChain(config);
+  const rpcUrls = [config.rpcUrl, ...(config.fallbackRpcUrls ?? [])]
+    .map((url) => url.trim())
+    .filter(Boolean);
+
+  const transports = rpcUrls.map((url) =>
+    http(url, { retryCount: 2, timeout: 8_000 }),
+  );
+
   return {
     httpClient: createPublicClient({
       chain,
-      transport: http(config.rpcUrl, { retryCount: 3, timeout: 15_000 }),
+      // A single flaky RPC must not stop wallet monitoring. Viem tries the next
+      // configured transport when the active provider errors or times out.
+      transport: transports.length > 1
+        ? fallback(transports, { rank: true, retryCount: 1 })
+        : transports[0],
     }),
     wsClient: config.wsUrl
       ? createPublicClient({
